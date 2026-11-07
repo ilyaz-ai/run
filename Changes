@@ -68,3 +68,23 @@ Revision history for Perl extension Run.
 	parent hung reading the pipe (depended on which fds were free; seen
 	in t/fdtable.t under prove).  Its handles are now closed at the
 	fd level too (close_fd).
+
+0.07:	(unreleased) For Proc::Spawner, which delegates its redirections to
+	Run where there is neither posix_spawn nor fork.
+	- Run::start(SPAWN, \@ARGS, REDIRS, \@ERRS, PROG) is public: PROG
+	  (optional) is the program to run when it is not $ARGS[0], as
+	  "system { PROG } LIST"; also through launch(), spawn_nowait() and
+	  fork_kid().  REDIRS may be what redir_list() takes; files it opens
+	  are closed after the start.
+	- Redirection specs {fd => M} (a copy of fd M as it is at that point)
+	  and {close => 1}, instead of the 2-argument strings ">&M", ">&-".
+	- Win32: Perl has no fcntl there, and close-on-exec is a handle that
+	  is not inherited; read and set through Win32API::File (which comes
+	  with Perl there): copies above a number by dup (no F_DUPFD),
+	  is_cloexec read, not inferred.  Before, the forkless code died there
+	  at the first fcntl.  Checked under Wine with Strawberry Perl 5.38.2:
+	  a program other than argv[0], a file on fd 1 with 2>&1, fd 0
+	  closed, a missing program, our fds put back.  Arguments go to Perl
+	  as they are: Perl's command line does not quote them as the C
+	  runtime parses them back (a bug of Perl's, reported).
+	New test t/start.t.

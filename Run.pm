@@ -11,7 +11,7 @@ require Exporter;
 
 @ISA = qw(Exporter);
 @EXPORT = qw(spawn);
-$VERSION = '0.06';
+$VERSION = '0.07';
 
 %EXPORT_TAGS = ( NEW => [qw(new_system new_spawn new_or new_and new_chain
 			    new_env new_redir new_pipe new_pipeline
@@ -42,14 +42,14 @@ sub spawn { spawn_nowait(0, \@_, []) }
 # always a program and its arguments, as in "system { PROG } LIST"; without
 # it, a single element is a command string, as for the builtin system.
 sub launch {
-  my ($spawn, $list, $args, $errs) = @_;
+  my ($spawn, $list, $args, $errs, $prog) = @_;
   if (!$spawn and !forkless()) {
     my @a = @$args;
-    my $res = do { no warnings 'exec'; $list ? system { $a[0] } @a : system @a };
+    my $res = do { no warnings 'exec'; $list ? system { $prog // $a[0] } @a : system @a };
     err($errs, "exec `@a': $!") if $res == -1;
     return $res;
   }
-  my $pid = spawn_nowait($list, $args, $errs);
+  my $pid = spawn_nowait($list, $args, $errs, $prog);
   return $pid if $spawn;
   $pid or return -1;
   local @SIG{qw(INT QUIT)} = ('IGNORE') x 2;
@@ -63,7 +63,7 @@ sub launch {
 # Unix, which has no spawn, it is emulated by fork and exec with nothing in
 # between.  $list: as for launch().
 sub spawn_nowait {
-  my ($list, $args, $errs) = @_;
+  my ($list, $args, $errs, $prog) = @_;
   my @a = @$args;
   if ($^O eq 'os2' and !$list and @a == 1
       and ( $a[0] =~ /[\`|\"\'\$&;*?\{\}\[\]\(\)<>\s~]/
@@ -76,18 +76,54 @@ sub spawn_nowait {
   }
   if ($dosish) {
     # untested: relies on do_aspawn() taking the leading 1 as P_NOWAIT
-    my $pid = do { no warnings 'exec'; $list ? system { $a[0] } 1, @a : system 1, @a };
+    my $pid = do { no warnings 'exec'; $list ? system { $prog // $a[0] } 1, @a : system 1, @a };
     return $pid > 0 ? $pid : err($errs, "spawn `@a': $!");
   }
-  fork_kid(1, $list, \@a, [], 3, $errs);
+  fork_kid(1, $list, \@a, [], 3, $errs, $prog);
+}
+
+# Win32 (0.07): Perl has no fcntl there, and close-on-exec is a handle that is
+# not inherited; Win32API::File (which comes with Perl there) reads and sets it.
+my $win32 = $^O eq 'MSWin32';
+sub win_handle {		# the OS handle of fd $n, or undef ($! = EBADF)
+  require Win32API::File;
+  my $h = Win32API::File::FdGetOsFHandle($_[0]);
+  return $h if defined $h and $h != Win32API::File::INVALID_HANDLE_VALUE();
+  $! = POSIX::EBADF(); return;
+}
+sub win_inherit {		# fd $n inherited or not; true on success
+  my ($n, $on) = @_;
+  my $h = win_handle($n) // return;
+  Win32API::File::SetHandleInformation($h, Win32API::File::HANDLE_FLAG_INHERIT(),
+				       $on ? Win32API::File::HANDLE_FLAG_INHERIT() : 0);
+}
+sub win_dup_above {		# no F_DUPFD there: dup until high enough
+  my ($src, $min) = @_;
+  my ($fd, @low);
+  while (defined(my $d = POSIX::dup($src))) {
+    if ($d >= $min) { $fd = $d; last }
+    push @low, $d;
+  }
+  my $e = $!; POSIX::close($_) for @low; $! = $e;
+  $fd;
+}
+sub cloexec_fh {		# FD_CLOEXEC on the handle's fd
+  my $fh = shift;
+  $win32 ? win_inherit(fileno $fh, 0) : fcntl($fh, F_SETFD, FD_CLOEXEC);
 }
 
 # A close-on-exec copy of $fh's fd at the lowest free fd >= $min.
 sub dup_above {
   my ($fh, $min, $mode) = @_;
-  my $fd = fcntl($fh, F_DUPFD, $min) // return;
-  open my $copy, ($mode || '<') . '&=', $fd or POSIX::close($fd), return;
-  fcntl($copy, F_SETFD, FD_CLOEXEC) or return;
+  my $fd;
+  my $copy;
+  if ($win32) {			# $fh may be an fd number there
+    $fd = win_dup_above(ref $fh ? fileno $fh : $fh, $min) // return;
+  } else {
+    $fd = fcntl($fh, F_DUPFD, $min) // return;
+  }
+  open $copy, ($mode || '<') . '&=', $fd or POSIX::close($fd), return;
+  cloexec_fh($copy) or return;
   $copy;
 }
 
@@ -115,6 +151,12 @@ sub redir_list {
   while (my ($n, $spec) = splice @pairs, 0, 2) {
     $n =~ /^\d+\z/ or return err($errs, "not a file descriptor: `$n'");
     my ($file, $mode) = @$spec{qw(filename mode)};
+    if (defined $spec->{fd}) {		# {fd => M} (0.07)
+      $spec->{fd} =~ /^\d+\z/ or return err($errs, "not a file descriptor: `$spec->{fd}'");
+      push @out, [$n, fd => $spec->{fd}];
+      next;
+    }
+    if ($spec->{close}) { push @out, [$n, close => 1]; next }	# {close => 1} (0.07)
     if (!defined $file) {
       push @out, [$n, ($spec->{pin} ? 'pin' : 'fh'), $spec->{filehandle}];
       next;
@@ -131,7 +173,7 @@ sub redir_list {
       $fh = IO::File->new($file);
     }
     $fh or return err($errs, "Cannot open `$file': $!");
-    fcntl($fh, F_SETFD, FD_CLOEXEC);	# even with a large $^F
+    cloexec_fh($fh);		# even with a large $^F
     push @$opened, $fh;
     push @out, [$n, pin => $fh];
   }
@@ -159,10 +201,20 @@ sub apply {
 
 # Runs the program @$args (never a shell string) with @$redirs applied;
 # returns the pid when $spawn, else $?.  When nothing was started, returns
-# undef (spawn) or -1 (system), with a message in @$errs.
+# undef (spawn) or -1 (system), with a message in @$errs.  $prog (optional):
+# the program to run, when it is not $args->[0] (as "system { PROG } LIST").
+# $redirs: a Run::redirlist, or what redir_list() takes (files it opens are
+# closed again after the start).  Public since 0.07.
 sub start {
-  my ($spawn, $args, $redirs, $errs) = @_;
-  return launch($spawn, 1, $args, $errs) unless @$redirs;
+  my ($spawn, $args, $redirs, $errs, $prog) = @_;
+  if (ref $redirs ne 'Run::redirlist') {
+    my @opened;
+    my $list = redir_list($redirs, \@opened, $errs);
+    my $res = $list ? start($spawn, $args, $list, $errs, $prog) : $spawn ? undef : -1;
+    my $e = $!; close $_ for @opened; $! = $e;
+    return $res;
+  }
+  return launch($spawn, 1, $args, $errs, $prog) unless @$redirs;
   my $base = 3;			# first fd above every target
   $_->[0] >= $base and $base = $_->[0] + 1 for @$redirs;
   # A file Run opened may sit on a target fd: move it above all targets.
@@ -174,8 +226,8 @@ sub start {
     push @pins, $pin;
     push @list, [$n, fd => fileno $pin];
   }
-  forkless() ? wraparound($spawn, $args, \@list, $base, $errs)
-              : fork_kid($spawn, 1, $args, \@list, $base, $errs);
+  forkless() ? wraparound($spawn, $args, \@list, $base, $errs, $prog)
+              : fork_kid($spawn, 1, $args, \@list, $base, $errs, $prog);
 }
 
 # Closes the fd of handle $h even when PerlIO counts another owner for that
@@ -188,7 +240,7 @@ sub close_fd { my $h = shift; POSIX::close(fileno $h); close $h }
 # A close-on-exec pipe carries "errno message" back if anything before exec
 # fails.
 sub fork_kid {
-  my ($spawn, $list, $args, $redirs, $base, $errs) = @_;
+  my ($spawn, $list, $args, $redirs, $base, $errs, $prog) = @_;
   pipe my $r0, my $w0 or return err($errs, "pipe: $!");
   my ($r, $w) = (scalar dup_above($r0, $base), scalar dup_above($w0, $base, ">"));
   close_fd($_) for $r0, $w0;
@@ -202,7 +254,7 @@ sub fork_kid {
     close_fd($r);
     my @kid_errs;
     if (apply($redirs, \@kid_errs)) {
-      { no warnings 'exec'; $list ? exec { $args->[0] } @$args : exec @$args }
+      { no warnings 'exec'; $list ? exec { $prog // $args->[0] } @$args : exec @$args }
       err(\@kid_errs, "exec `@$args': $!");
     }
     syswrite $w, ($!+0) . " $kid_errs[0]";
@@ -238,6 +290,12 @@ sub fdinfo_flags {
 }
 sub is_cloexec {
   my $n = shift;
+  if ($win32) {			# Win32: read, not inferred (0.07)
+    my $h = win_handle($n) // return;
+    my $f = 0;
+    Win32API::File::GetHandleInformation($h, $f) or return;
+    return $f & Win32API::File::HANDLE_FLAG_INHERIT() ? 0 : 1;
+  }
   unless (defined $cloexec_bit) {
     $cloexec_bit = 0;
     if (pipe my $r, my $w) {
@@ -270,6 +328,7 @@ sub release {
 # Sets FD_CLOEXEC on fd $n.
 sub set_cloexec {
   my $n = shift;
+  return win_inherit($n, 0) if $win32;
   local $^F = $n - 1 if $n - 1 < $^F;	# Perl's own open sets it for fd > $^F
   open my $alias, '<&=', $n or return;
   fcntl($alias, F_SETFD, FD_CLOEXEC);
@@ -280,7 +339,7 @@ sub set_cloexec {
 # this process, spawn (the kid inherits the table), then put every target back
 # as it was: same file, same FD_CLOEXEC, or closed.
 sub wraparound {
-  my ($spawn, $args, $redirs, $base, $errs) = @_;
+  my ($spawn, $args, $redirs, $base, $errs, $prog) = @_;
   IO::Handle::flush($_) for grep defined fileno $_, \*STDOUT, \*STDERR,
     map $_->[1] eq 'fh' ? $_->[2] : (), @$redirs;
   my (%seen, @saved, $res);
@@ -292,15 +351,20 @@ sub wraparound {
       push @saved, [$n];		# closed now, closed afterwards
       next;
     }
-    # The alias may change $n's flag; harmless, as apply() replaces $n.
-    open my $alias, '<&=', $n or $ok = err($errs, "fd $n: $!"), last;
-    my $copy = dup_above($alias, $base);
-    release($alias, $n);
+    my $copy;
+    if ($win32) {			# an fd number does there: no alias needed
+      $copy = dup_above($n, $base);
+    } else {
+      # The alias may change $n's flag; harmless, as apply() replaces $n.
+      open my $alias, '<&=', $n or $ok = err($errs, "fd $n: $!"), last;
+      $copy = dup_above($alias, $base);
+      release($alias, $n);
+    }
     $copy or $ok = err($errs, "fd $n: $!"), last;
     push @saved, [$n, $copy, $cloexec];
   }
   if ($ok and apply($redirs, $errs)) {
-    $res = launch($spawn, 1, $args, $errs);
+    $res = launch($spawn, 1, $args, $errs, $prog);
   }
   for (reverse @saved) {
     my ($n, $copy, $cloexec) = @$_;
@@ -419,7 +483,7 @@ sub Run::pipe::run {
   my ($dir, $cmd) = @$tree;
   pipe my $r, my $w
     or print(STDERR "cannot create pipe: $!\n"), return;
-  fcntl($_, F_SETFD, FD_CLOEXEC) for $r, $w;	# even with a large $^F
+  cloexec_fh($_) for $r, $w;	# even with a large $^F
   my ($kid_end, $ours, $fd) = $dir eq 'r' ? ($w, $r, 1) : ($r, $w, 0);
   local $data->{'spawn'} = 1;
   Run::redir->new([$fd => {filehandle => $kid_end, pin => 1}], $cmd)
@@ -492,7 +556,7 @@ sub Run::pipeline::run {
       "pipeline: without fork (\$Run::Forkless), only one element may be other than a simple command"), last;
     for (1 .. $#$tree) {
       pipe my $r, my $w or err($errs, "cannot create pipe: $!"), last;
-      fcntl($_, F_SETFD, FD_CLOEXEC) for $r, $w;	# even with a large $^F
+      cloexec_fh($_) for $r, $w;	# even with a large $^F
       push @pipes, [$r, $w];
     }
     @pipes == $#$tree or last;
@@ -705,6 +769,17 @@ spawn that inherits the fd table, and afterwards every target fd is put
 back as it was: open on the same file with the same close-on-exec flag, or
 closed.
 
+=head1 STARTING ONE PROGRAM
+
+C<Run::start(SPAWN, \@ARGS, REDIRS, \@ERRS, PROG)> (public since 0.07) runs
+the program C<@ARGS> (never a shell string) with REDIRS applied: a list as
+under L</REDIRECTIONS>, or C<[FD =E<gt> SPEC, ...]> pairs.  Two more SPECs
+exist for it: C<{fd =E<gt> M}> (FD becomes a copy of fd M as it is at that
+point) and C<{close =E<gt> 1}> (FD is closed).  PROG (optional) is the
+program to run when it is not C<$ARGS[0]>, as C<system { PROG } LIST>.
+Returns the pid when SPAWN is true, else C<$?>; when nothing was started,
+undef (SPAWN) or -1, with C<$!> set and a message pushed on C<@ERRS>.
+
 =head1 FORKLESS
 
 On OS/2, Win32 and VMS C<$Run::Forkless> is true, and Run starts every
@@ -722,10 +797,14 @@ tested.  What the emulation does not reproduce: on Win32 a kid sees only
 fds 0..2, and the close-on-exec flag is a Unix notion.
 
 Limits of the parent-side way: other threads see the redirected fds while
-the kid starts; and outside Linux the close-on-exec flag of a target fd is
-inferred, not read (Perl cannot look at it without changing it), so a fd
-opened by C code with the flag set comes back without it.  Only the Unix
-ways have been tested; on Win32 a kid sees only fds 0..2.
+the kid starts; and outside Linux and Win32 the close-on-exec flag of a
+target fd is inferred, not read (Perl cannot look at it without changing
+it), so a fd opened by C code with the flag set comes back without it.  On
+Win32 (since 0.07) the flag is the handle's inheritance, read and set through
+Win32API::File; a kid sees only fds 0..2 there (Perl's spawn passes the
+standard handles), and its arguments go through Perl's command line, which
+does not quote them as the kid's C runtime parses them back.  Tested on
+Linux, and on Win32 under Wine (Strawberry Perl 5.38.2); OS/2 and VMS not.
 
 =head1 NOTES
 
