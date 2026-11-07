@@ -662,50 +662,149 @@ __END__
 
 =head1 NAME
 
-Run - Perl extension for to start programs in background
+Run - start programs in the background, and run command trees (and, or, chains, pipelines, redirections) without a shell
 
 =head1 SYNOPSIS
 
-  use Run;
-  $pid = spawn 'long_running_task', 'arg1', 'arg2' or die "spawn: $!";
+  use Run;                      # exports spawn
+  my $pid = spawn 'long_running_task', 'arg1', 'arg2' or die "spawn: $!";
   do_something_else();
-  waitpid($pid,0);
+  waitpid $pid, 0;
+
+  use Run ':NEW';               # the command trees
+  my $tree = new_pipeline(new_system('sort'),
+                          new_redir([1 => {filename => 'out.txt', mode => '>'}],
+                                    new_system('uniq', '-c')));
+  my %data = (errs => []);
+  $tree->run(\%data) or warn "status $data{result}: @{$data{errs}}";
+
+  # one program, its redirections applied as sh would (public since 0.07)
+  my @errs;
+  my $kid = Run::start(1, ['prog', 'arg'],
+                       [1 => {filename => 'log', mode => '>>'}, 2 => {fd => 1}],
+                       \@errs);
 
 =head1 DESCRIPTION
 
-The subroutine C<spawn> is equivalent to the builtin C<system> (see
-L<perlfunc/system LIST>) with the exceptions that the program is
-started in background, and the return the C<pid> of the kid.
+Run starts programs with redirections, without a shell, on systems with
+C<fork> and on systems with a native spawn but no C<fork> (Win32, OS/2,
+VMS; see L</FORKLESS>).  It has three layers:
 
-Returns 0 on failure, $! should contain the reason for the failure.
+=over
+
+=item C<spawn>
+
+like the builtin C<system>, but the program runs in the background (see
+L</spawn>);
+
+=item command trees
+
+nodes for simple commands, C<&&>, C<||>, C<;>, pipelines, pipes to and from
+this process, command substitution, environment settings and redirections,
+which C<run> as sh would run the same command line (see L</COMMAND TREES>);
+
+=item C<Run::start>
+
+one program with a list of redirections (see L</STARTING ONE PROGRAM>), the
+layer the others are built on; L<Proc::Spawner> uses it where there is
+neither posix_spawn nor C<fork>.
+
+=back
 
 =head1 EXPORT
 
-Exports C<spawn> by default.
+C<spawn> by default; the tag C<:NEW> exports the constructors
+C<new_system>, C<new_spawn>, C<new_and>, C<new_or>, C<new_chain>,
+C<new_env>, C<new_redir>, C<new_pipe>, C<new_pipeline>, C<new_readpipe>
+and C<new_readpipe_split>.
 
-=head1 AUTHOR
+=head1 spawn
 
-Ilya Zakharevich <ilya@math.ohio-state.edu
+C<spawn LIST> starts LIST as the builtin C<system LIST> would (a single
+string is a command line for the shell; more elements, a program and its
+arguments) and returns the kid's pid at once; the caller waits for it with
+C<waitpid>.  Without C<fork> it is C<system 1, LIST> (P_NOWAIT).  When
+nothing was started it returns undef, with C<$!> set.
 
-=head1 TODO
+=head1 COMMAND TREES
 
-What to do with C<errs> in C<or>?  Should they be cleared?
+A tree is built of these nodes (C<CMD> is a node):
 
-=head1 COMMANDS AND STATUS
+=over
 
-C<new_system(PROG, ARGS...)> and C<new_spawn(...)> always run PROG with
-ARGS, as C<system { PROG } PROG, ARGS> does: a single element is a
-program name, never a shell command (unlike the exported C<spawn>, which
-keeps the builtin C<system>'s meaning of a single string).
+=item C<new_system(PROG, ARGS...)>
 
-C<run> returns true iff the command succeeded.  Every C<new_system>
-leaves its C<$?> in C<$data-E<gt>{result}>, 0 included, or -1 when
-nothing was started (the program or a redirection target could not be
-opened; the reason is in C<errs>).  So after C<new_and>, C<new_or>,
-C<new_chain> and C<new_pipeline> it holds the status sh would give.
-C<new_chain> succeeds iff its last command does, as in sh.
-C<new_readpipe> and C<new_readpipe_split> wait for their kid and leave
-its status there too; the output keeps its trailing newlines.
+runs PROG with ARGS and waits for it.  PROG and ARGS are never a shell
+command line: a single element is a program name (as C<system { PROG }
+PROG, ARGS>).  An element that is itself a node (C<new_readpipe>,
+C<new_readpipe_split>) is replaced by that node's output first, as a
+command substitution is.
+
+=item C<new_spawn(PROG, ARGS...)>
+
+the same, without waiting: the kid's pid is pushed on C<$data-E<gt>{pids}>.
+
+=item C<new_and(CMD...)>, C<new_or(CMD...)>, C<new_chain(CMD...)>
+
+C<CMD && CMD ...>, C<CMD || CMD ...> and C<CMD; CMD ...>.  They wait for
+each command, so they cannot run under C<new_spawn> or C<new_pipe>.
+
+=item C<new_env({NAME =E<gt> VALUE, ...}, CMD)>
+
+CMD with these variables added to its environment.
+
+=item C<new_redir(REDIRS, CMD)>
+
+CMD with these redirections (see L</REDIRECTIONS>), applied after the
+outer ones, as in sh's C<{ CMD 2E<gt>&1; } E<gt>f>.
+
+=item C<new_pipeline(CMD...)>
+
+C<CMD | CMD | ...>; see L</PIPELINES>.
+
+=item C<new_pipe('r' or 'w', CMD)>
+
+starts CMD (a simple command) with its fd 1 (C<'r'>) or fd 0 (C<'w'>) on a
+pipe, and C<run> returns this process's end of it as a handle.  The kid's
+pid is pushed on C<$data-E<gt>{pids}>; the caller waits for it.
+
+=item C<new_readpipe(CMD)>, C<new_readpipe_split(CMD)>
+
+C<run> returns CMD's whole output (trailing newlines kept), or that output
+split at whitespace; the kid is waited for.  As an argument of
+C<new_system> they are command substitutions.
+
+=back
+
+C<$tree-E<gt>run(\%DATA)> runs a tree; C<%DATA> (optional) passes:
+
+=over
+
+=item C<errs =E<gt> \@ERRS>
+
+the messages (a program or a file that could not be opened, ...) are
+pushed here; without it they are printed on STDERR.
+
+=item C<env =E<gt> {...}>, C<redir =E<gt> REDIRS>
+
+variables and redirections for every command of the tree.
+
+=item C<pids =E<gt> \@PIDS>
+
+receives the pids of C<new_spawn> and C<new_pipe> kids.
+
+=item C<result>
+
+set by C<run>: the C<$?> of the last command that ran, 0 included, or -1
+when nothing was started (the program or a redirection target could not
+be opened; the reason is in C<errs>).
+
+=back
+
+C<run> returns true iff the command succeeded (C<new_pipe>: the handle;
+C<new_readpipe>: the output).  After C<new_and>, C<new_or>, C<new_chain>
+and C<new_pipeline>, C<result> holds the status sh would give; C<new_chain>
+succeeds iff its last command does, as in sh.
 
 =head1 PIPELINES
 
@@ -739,31 +838,14 @@ pipeline cannot itself run under C<spawn> (as a C<new_pipe> element).
 
 =head1 REDIRECTIONS
 
-C<new_redir> and C<run({redir =E<gt> ...})> take either a hash
-C<{FD =E<gt> SPEC}>, applied in increasing FD, or an array
-C<[FD =E<gt> SPEC, ...]>, applied in the order given.  SPEC is
-C<{filehandle =E<gt> FH}>, C<{filename =E<gt> STRING}> or
-C<{filename =E<gt> NAME, mode =E<gt> OP}>.  As in sh,
+C<new_redir>, C<run({redir =E<gt> ...})> and C<Run::start> take either a
+hash C<{FD =E<gt> SPEC}>, applied in increasing FD, or an array
+C<[FD =E<gt> SPEC, ...]>, applied in the order given.  As in sh,
 redirections are applied left to right, outer C<new_redir> first, so
-C<[1 =E<gt> {filename =E<gt> 'E<gt>f'}, 2 =E<gt> {filename =E<gt> 'E<gt>&1'}]>
-is C<E<gt>f 2E<gt>&1>, and the reverse order is C<2E<gt>&1 E<gt>f>.
+C<[1 =E<gt> {filename =E<gt> 'f', mode =E<gt> 'E<gt>'}, 2 =E<gt> {fd =E<gt> 1}]>
+is C<E<gt>f 2E<gt>&1>, and the reverse order is C<2E<gt>&1 E<gt>f>.  SPEC is one of:
 
 =over
-
-=item C<{filehandle =E<gt> FH}>, C<{filename =E<gt> 'E<gt>&N'}> (or C<'E<gt>&=N'>, C<'E<lt>&N'>)
-
-FD becomes a copy of fd C<fileno FH> (or N) I<as it is at that point>,
-so an earlier redirection of that fd counts.
-
-=item C<{filename =E<gt> 'E<gt>&-'}> (or C<'E<lt>&-'>)
-
-FD is closed in the kid.
-
-=item C<{filehandle =E<gt> FH, pin =E<gt> 1}>
-
-FD becomes a copy of FH's file, even when C<fileno FH> is itself one of
-the target fds: FH is first copied above every target.  This is the safe
-way to pass a file the caller opened, or a pipe end.
 
 =item C<{filename =E<gt> NAME, mode =E<gt> OP}>
 
@@ -773,9 +855,28 @@ C<E<gt>|> create or truncate, C<E<gt>E<gt>> appends, C<E<lt>E<gt>> reads
 and writes, creating the file but not truncating it.  FD becomes a copy of
 that file.  Use this form for names that come from elsewhere.
 
-=item any other C<{filename =E<gt> STRING}>
+=item C<{fd =E<gt> M}> (since 0.07), C<{filehandle =E<gt> FH}>
 
-STRING is opened with 2-argument C<open>; FD becomes a copy of that file.
+FD becomes a copy of fd M (or C<fileno FH>) I<as it is at that point>, so
+an earlier redirection of that fd counts: sh's C<FDE<gt>&M>.
+
+=item C<{close =E<gt> 1}> (since 0.07)
+
+FD is closed in the kid: sh's C<FDE<gt>&->.
+
+=item C<{filehandle =E<gt> FH, pin =E<gt> 1}>
+
+FD becomes a copy of FH's file, even when C<fileno FH> is itself one of
+the target fds: FH is first copied above every target.  This is the safe
+way to pass a file the caller opened, or a pipe end.
+
+=item C<{filename =E<gt> STRING}>
+
+the older form: C<'E<gt>&N'> (or C<'E<gt>&=N'>, C<'E<lt>&N'>) is
+C<{fd =E<gt> N}>, C<'E<gt>&-'> (or C<'E<lt>&-'>) is C<{close =E<gt> 1}>;
+any other STRING is opened with 2-argument C<open> (so C<-> means STDIN or
+STDOUT, leading blanks are dropped, and so on), and FD becomes a copy of
+that file.
 
 =back
 
@@ -789,45 +890,55 @@ closed.
 =head1 STARTING ONE PROGRAM
 
 C<Run::start(SPAWN, \@ARGS, REDIRS, \@ERRS, PROG)> (public since 0.07) runs
-the program C<@ARGS> (never a shell string) with REDIRS applied: a list as
-under L</REDIRECTIONS>, or C<[FD =E<gt> SPEC, ...]> pairs.  Two more SPECs
-exist for it: C<{fd =E<gt> M}> (FD becomes a copy of fd M as it is at that
-point) and C<{close =E<gt> 1}> (FD is closed).  PROG (optional) is the
-program to run when it is not C<$ARGS[0]>, as C<system { PROG } LIST>.
-Returns the pid when SPAWN is true, else C<$?>; when nothing was started,
-undef (SPAWN) or -1, with C<$!> set and a message pushed on C<@ERRS>.
+the program C<@ARGS> (never a shell command line) with REDIRS applied (see
+L</REDIRECTIONS>; files it opens for them are closed again after the
+start).  PROG (optional) is the program to run when it is not
+C<$ARGS[0]>, as C<system { PROG } LIST>.  Returns the pid when SPAWN is
+true, else C<$?>; when nothing was started, undef (SPAWN) or -1, with C<$!>
+set and a message pushed on C<@ERRS>.
 
 =head1 FORKLESS
 
 On OS/2, Win32 and VMS C<$Run::Forkless> is true, and Run starts every
-process with one primitive, C<Run::spawn_nowait(LIST_FLAG, \@ARGS, \@ERRS)>:
-like C<spawnvp(P_NOWAIT)>, the kid gets this process's fd table as it is
+process with one primitive,
+C<Run::spawn_nowait(LIST_FLAG, \@ARGS, \@ERRS, PROG)>: like
+C<spawnvp(P_NOWAIT)>, the kid gets this process's fd table as it is
 (except close-on-exec fds), and the pid is returned (undef, with a
-message, if nothing started).  There it is C<system 1, ...>.  Nothing else
-in Run forks; C<new_system> is C<spawn_nowait> followed by C<waitpid>.
+message, if nothing started).  There it is C<system { PROG } 1, ARGS>
+(with a false LIST_FLAG, C<system 1, ARGS>, whose single string is a
+command line).  Nothing else in Run forks; C<new_system> is
+C<spawn_nowait> followed by C<waitpid>.
 
 On Unix, which has no spawn, the primitive is emulated by C<fork> and
 C<exec> with nothing in between.  Setting C<$Run::Forkless> (C<local> is
 fine; C<$Run::Wraparound> is the old name, and either one set means
 forkless) runs the forkless code paths there, which is how they are
-tested.  What the emulation does not reproduce: on Win32 a kid sees only
-fds 0..2, and the close-on-exec flag is a Unix notion.
+tested.
 
 Limits of the parent-side way: other threads see the redirected fds while
 the kid starts; and outside Linux and Win32 the close-on-exec flag of a
 target fd is inferred, not read (Perl cannot look at it without changing
-it), so a fd opened by C code with the flag set comes back without it.  On
-Win32 (since 0.07) the flag is the handle's inheritance, read and set through
-Win32API::File; a kid sees only fds 0..2 there (Perl's spawn passes the
-standard handles), and its arguments go through Perl's command line, which
-does not quote them as the kid's C runtime parses them back.  Tested on
-Linux, and on Win32 under Wine (Strawberry Perl 5.38.2); OS/2 and VMS not.
+it), so a fd opened by C code with the flag set comes back without it.
 
-C<$Run::AsWin32> (true on Win32) takes the Win32 code paths: copies made by
-C<dup> instead of C<F_DUPFD>, the flag read and set through C<os_inherit()>.
-Set it on Unix (or C<RUN_AS_WIN32=1> in the environment) to debug and test
-them there: C<FD_CLOEXEC> then stands in for the handle's inheritance, so all
-but the Win32API::File calls themselves run.
+=head2 Win32
+
+Perl's own spawn passes a kid fds 0..2 only (as its standard handles), and
+in a new process group; at most 64 kids can be running at once (Perl's
+table of children: then C<EAGAIN>).  Perl has no C<fcntl> there:
+close-on-exec is the handle's inheritance, read and set through
+L<Win32API::File> (which comes with Perl there; since 0.07).  A kid's
+arguments go through Perl's command line, which does not quote them as the
+kid's C runtime parses them back: an argument with C<"> or a trailing
+C<\> does not arrive as given (a bug of Perl's; the test is TODO).
+Tested under Wine with Strawberry Perl 5.38.2; OS/2 and VMS are not tested.
+
+C<$Run::AsWin32> (true on Win32) selects these code paths: copies made by
+C<dup> instead of C<F_DUPFD>, no alias handles while fds are saved, the
+flag read and set through C<os_inherit()>.  Set it on Unix (or
+C<RUN_AS_WIN32=1> in the environment, before Run is loaded) to debug and
+test them there: C<FD_CLOEXEC> then stands in for the handle's
+inheritance, so all but the Win32API::File calls themselves run.
+F<t/as-win32.t> runs every test file so.
 
 =head1 NOTES
 
@@ -836,8 +947,17 @@ C<FH> will invalidate C<FH1> -- unless another Perl handle also uses that
 fd: PerlIO counts the handles of each fd.  Such an open also sets or
 clears close-on-exec on that fd according to C<$^F>.
 
+=head1 TODO
+
+The messages of the commands of C<new_or> that failed stay in C<errs> when
+a later one succeeds; should they be cleared?
+
+=head1 AUTHOR
+
+Ilya Zakharevich E<lt>ilyaz@cpan.orgE<gt>
+
 =head1 SEE ALSO
 
-perl(1).
+L<perlfunc/system>, L<perlport>, L<Proc::Spawner>.
 
 =cut

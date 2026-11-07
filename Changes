@@ -69,7 +69,8 @@ Revision history for Perl extension Run.
 	in t/fdtable.t under prove).  Its handles are now closed at the
 	fd level too (close_fd).
 
-0.07:	(unreleased) For Proc::Spawner, which delegates its redirections to
+0.07  2026-11-07
+	For Proc::Spawner, which delegates its redirections to
 	Run where there is neither posix_spawn nor fork.
 	- Run::start(SPAWN, \@ARGS, REDIRS, \@ERRS, PROG) is public: PROG
 	  (optional) is the program to run when it is not $ARGS[0], as
@@ -86,7 +87,7 @@ Revision history for Perl extension Run.
 	  a program other than argv[0], a file on fd 1 with 2>&1, fd 0
 	  closed, a missing program, our fds put back.  Arguments go to Perl
 	  as they are: Perl's command line does not quote them as the C
-	  runtime parses them back (a bug of Perl's, reported).
+	  runtime parses them back (a bug of Perl's, to be reported).
 	- $Run::AsWin32 (true on Win32; RUN_AS_WIN32=1 or set it on Unix, for
 	  debugging): the Win32 code paths, with FD_CLOEXEC standing in for
 	  the handle's inheritance on Unix (os_inherit()), so all but the
@@ -99,3 +100,9 @@ Revision history for Perl extension Run.
 	first copy of an fd: "Your vendor has not defined Fcntl macro F_DUPFD";
 	on Unix it runs with $Run::AsWin32), t/as-win32.t (every other test
 	file again with RUN_AS_WIN32=1, one test per file; skipped on Win32).
+	- The documentation brought up to date: the three layers (spawn, the
+	  command trees, Run::start), every constructor and the keys of run's
+	  data (errs, env, redir, pids, result), all the redirection specs,
+	  Win32; spawn returns undef on failure (not 0, as it said).  README
+	  rewritten; Makefile.PL with abstract, author, prerequisites (Perl
+	  5.10.1), repository.
