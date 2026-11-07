@@ -2,7 +2,7 @@
 # Fixes in 0.05: a one-element command is a program, not a shell string;
 # {filename, mode} opens literal names as sh does; $data->{result} is the
 # status of the last command; readpipe reaps its kid.  Each check runs with
-# redirections applied in the kid (fork) and in the parent ($Run::Wraparound).
+# redirections applied in the kid (fork) and in the parent ($Run::Forkless).
 use strict; use warnings;
 use Test::More;
 use POSIX ();
@@ -19,8 +19,8 @@ sub to { new_redir([1 => {filename => $_[0], mode => $_[1] // '>'}], $_[2]) }
 put('my prog', "#!/bin/sh\necho ran \"\$@\"\n"); chmod 0755, 'my prog';
 
 for my $wrap (0, 1) {
-  local $Run::Wraparound = $wrap;
-  my $m = $wrap ? 'wraparound' : 'fork';
+  local $Run::Forkless = $wrap;
+  my $m = $wrap ? 'forkless' : 'fork';
   unlink glob '* .*';
   put('my prog', "#!/bin/sh\necho ran \"\$@\"\n"); chmod 0755, 'my prog';
 

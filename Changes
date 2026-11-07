@@ -54,3 +54,17 @@ Revision history for Perl extension Run.
 	Not tested: the list form "system { PROG } 1, LIST" on OS/2, Win32
 	and VMS.
 	New tests t/fixes.t and t/pipeline.t.
+
+0.06:	Forkless mode made testable on Unix.  $Run::Forkless (true on OS/2,
+	Win32, VMS; $Run::Wraparound is the old name) routes every process
+	start through one primitive, spawn_nowait(), as spawnvp(P_NOWAIT):
+	"system 1, ..." there, fork+exec with nothing in between on Unix.
+	Nothing else forks when forkless; new_system is spawn_nowait plus
+	waitpid.  New test t/forkless.t checks that every fork comes from
+	spawn_nowait, and runs each kind of node forkless.
+	Fix, found that way: fork_kid's exec-error pipe, created inside the
+	wraparound, could land on a fd that apply() had closed under a Perl
+	handle; PerlIO then counted two owners, never closed it, and the
+	parent hung reading the pipe (depended on which fds were free; seen
+	in t/fdtable.t under prove).  Its handles are now closed at the
+	fd level too (close_fd).

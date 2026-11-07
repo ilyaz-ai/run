@@ -1,7 +1,7 @@
 package Run;
 
 use strict;
-use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $Wraparound);
+use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $Wraparound $Forkless);
 use Fcntl qw(F_GETFD F_SETFD F_DUPFD FD_CLOEXEC
 	     O_RDONLY O_WRONLY O_RDWR O_CREAT O_TRUNC O_APPEND);
 use POSIX ();
@@ -11,7 +11,7 @@ require Exporter;
 
 @ISA = qw(Exporter);
 @EXPORT = qw(spawn);
-$VERSION = '0.05';
+$VERSION = '0.06';
 
 %EXPORT_TAGS = ( NEW => [qw(new_system new_spawn new_or new_and new_chain
 			    new_env new_redir new_pipe new_pipeline
@@ -24,14 +24,18 @@ $VERSION = '0.05';
 @Run::env::ISA = @Run::pipe::ISA = @Run::redir::ISA = qw(Run::base2);
 @Run::readpipe::ISA = @Run::readpipe_split::ISA = qw(Run::base1);
 
-# Without fork(), redirections are applied in the parent around a spawn that
-# inherits the fd table ("wraparound").  With fork(), they are applied in the
-# kid between fork and exec, and the parent's fd table is never touched.
-$Wraparound = $^O =~ /^(?:os2|MSWin32|VMS)\z/ unless defined $Wraparound;
+# Forkless (OS/2, Win32, VMS; or set $Run::Forkless on Unix to run these code
+# paths): every process is started by spawn_nowait(), and redirections are
+# applied in the parent around it ("wraparound").  Otherwise they are applied
+# in the kid between fork and exec, and the parent's fd table is never
+# touched.  $Run::Wraparound is the old name: either one set means forkless.
+my $dosish = $^O =~ /^(?:os2|MSWin32|VMS)\z/;
+$Forkless = $dosish unless defined $Forkless;
+sub forkless { $Forkless || $Wraparound }
 
 sub err { my $errs = shift; push @$errs, join '', @_; return }
 
-sub spawn { launch(1, 0, \@_, []) }
+sub spawn { spawn_nowait(0, \@_, []) }
 
 # Starts @$args with the current fd table: returns the pid when $spawn, else
 # $? (-1 if nothing started, with a message in @$errs).  With $list, $args is
@@ -39,12 +43,28 @@ sub spawn { launch(1, 0, \@_, []) }
 # it, a single element is a command string, as for the builtin system.
 sub launch {
   my ($spawn, $list, $args, $errs) = @_;
-  my @a = @$args;
-  unless ($spawn) {
+  if (!$spawn and !forkless()) {
+    my @a = @$args;
     my $res = do { no warnings 'exec'; $list ? system { $a[0] } @a : system @a };
     err($errs, "exec `@a': $!") if $res == -1;
     return $res;
   }
+  my $pid = spawn_nowait($list, $args, $errs);
+  return $pid if $spawn;
+  $pid or return -1;
+  local @SIG{qw(INT QUIT)} = ('IGNORE') x 2;
+  waitpid $pid, 0;
+  $?;
+}
+
+# The one primitive for starting a process when forkless, as spawnvp(P_NOWAIT):
+# the kid gets this process's fd table as it is (but no close-on-exec fd).
+# Returns the pid; undef (with a message in @$errs) if nothing started.  On
+# Unix, which has no spawn, it is emulated by fork and exec with nothing in
+# between.  $list: as for launch().
+sub spawn_nowait {
+  my ($list, $args, $errs) = @_;
+  my @a = @$args;
   if ($^O eq 'os2' and !$list and @a == 1
       and ( $a[0] =~ /[\`|\"\'\$&;*?\{\}\[\]\(\)<>\s~]/
 				# backslashes are allowed as far as
@@ -54,7 +74,7 @@ sub launch {
     unshift @a, '/bin/sh', '-c'; # /bin/sh will be auto-translated
                                  # to the installed place by system().
   }
-  if ($^O =~ /^(?:os2|MSWin32|VMS)\z/) {
+  if ($dosish) {
     # untested: relies on do_aspawn() taking the leading 1 as P_NOWAIT
     my $pid = do { no warnings 'exec'; $list ? system { $a[0] } 1, @a : system 1, @a };
     return $pid > 0 ? $pid : err($errs, "spawn `@a': $!");
@@ -154,22 +174,32 @@ sub start {
     push @pins, $pin;
     push @list, [$n, fd => fileno $pin];
   }
-  $Wraparound ? wraparound($spawn, $args, \@list, $base, $errs)
+  forkless() ? wraparound($spawn, $args, \@list, $base, $errs)
               : fork_kid($spawn, 1, $args, \@list, $base, $errs);
 }
+
+# Closes the fd of handle $h even when PerlIO counts another owner for that
+# fd number: inside the wraparound, a Perl handle may still claim a fd that
+# apply() has closed or replaced, and a new handle on that number would then
+# never close it.  (A pipe end left open hangs its reader.)
+sub close_fd { my $h = shift; POSIX::close(fileno $h); close $h }
 
 # fork(), apply the redirections in the kid, exec ($list: as for launch()).
 # A close-on-exec pipe carries "errno message" back if anything before exec
 # fails.
 sub fork_kid {
   my ($spawn, $list, $args, $redirs, $base, $errs) = @_;
-  pipe my $r, my $w or return err($errs, "pipe: $!");
-  ($r, $w) = (scalar dup_above($r, $base), scalar dup_above($w, $base, ">"));
-  $r && $w or return err($errs, "dup: $!");
-  my $pid = fork;
-  defined $pid or return err($errs, "fork: $!");
+  pipe my $r0, my $w0 or return err($errs, "pipe: $!");
+  my ($r, $w) = (scalar dup_above($r0, $base), scalar dup_above($w0, $base, ">"));
+  close_fd($_) for $r0, $w0;
+  my $pid = $r && $w ? fork : return err($errs, "dup: $!");
+  unless (defined $pid) {
+    my $e = "fork: $!";
+    close_fd($_) for $r, $w;
+    return err($errs, $e);
+  }
   if (!$pid) {
-    close $r;
+    close_fd($r);
     my @kid_errs;
     if (apply($redirs, \@kid_errs)) {
       { no warnings 'exec'; $list ? exec { $args->[0] } @$args : exec @$args }
@@ -178,9 +208,9 @@ sub fork_kid {
     syswrite $w, ($!+0) . " $kid_errs[0]";
     POSIX::_exit(127);
   }
-  close $w;
+  close_fd($w);
   my $msg = do { local $/; <$r> } // '';
-  close $r;
+  close_fd($r);
   if (length $msg) {
     my ($errno, $text) = split ' ', $msg, 2;
     waitpid $pid, 0;
@@ -458,8 +488,8 @@ sub Run::pipeline::run {
   };
   {
     $outer or last;
-    @compound > 1 and $Wraparound and err($errs,
-      "pipeline: with \$Run::Wraparound, only one element may be other than a simple command"), last;
+    @compound > 1 and forkless() and err($errs,
+      "pipeline: without fork (\$Run::Forkless), only one element may be other than a simple command"), last;
     for (1 .. $#$tree) {
       pipe my $r, my $w or err($errs, "cannot create pipe: $!"), last;
       fcntl($_, F_SETFD, FD_CLOEXEC) for $r, $w;	# even with a large $^F
@@ -615,8 +645,8 @@ of file and writers get C<SIGPIPE> as in sh.
 Only one element can run in this process (the last such one).  Where
 C<fork> exists, the others run in forked copies of this process, which
 exit with the status of their last command (255 if it died); their
-messages, and the message of a C<die>, come back into C<errs>.  With
-C<$Run::Wraparound> a second such element is refused.  If the element
+messages, and the message of a C<die>, come back into C<errs>.
+With C<$Run::Forkless> a second such element is refused.  If the element
 run in this process dies, the pipeline closes its pipes, reaps its kids
 and then rethrows.
 
@@ -670,11 +700,26 @@ STRING is opened with 2-argument C<open>; FD becomes a copy of that file.
 
 Where C<fork> exists, the redirections are applied in the kid between
 C<fork> and C<exec>, and the parent's fd table is never changed.  Where it
-does not (C<$Run::Wraparound> true: OS/2, Win32, VMS), they are applied in
-the parent around a spawn that inherits the fd table, and afterwards every
-target fd is put back as it was: open on the same file with the same
-close-on-exec flag, or closed.  Set C<$Run::Wraparound> before loading to
-force either way.
+does not (forkless, see below), they are applied in the parent around a
+spawn that inherits the fd table, and afterwards every target fd is put
+back as it was: open on the same file with the same close-on-exec flag, or
+closed.
+
+=head1 FORKLESS
+
+On OS/2, Win32 and VMS C<$Run::Forkless> is true, and Run starts every
+process with one primitive, C<Run::spawn_nowait(LIST_FLAG, \@ARGS, \@ERRS)>:
+like C<spawnvp(P_NOWAIT)>, the kid gets this process's fd table as it is
+(except close-on-exec fds), and the pid is returned (undef, with a
+message, if nothing started).  There it is C<system 1, ...>.  Nothing else
+in Run forks; C<new_system> is C<spawn_nowait> followed by C<waitpid>.
+
+On Unix, which has no spawn, the primitive is emulated by C<fork> and
+C<exec> with nothing in between.  Setting C<$Run::Forkless> (C<local> is
+fine; C<$Run::Wraparound> is the old name, and either one set means
+forkless) runs the forkless code paths there, which is how they are
+tested.  What the emulation does not reproduce: on Win32 a kid sees only
+fds 0..2, and the close-on-exec flag is a Unix notion.
 
 Limits of the parent-side way: other threads see the redirected fds while
 the kid starts; and outside Linux the close-on-exec flag of a target fd is

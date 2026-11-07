@@ -10,3 +10,4 @@ t/redir_mayfail.t
 t/fdtable.t
 t/fixes.t
 t/pipeline.t
+t/forkless.t

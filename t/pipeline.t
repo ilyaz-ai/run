@@ -2,7 +2,7 @@
 # new_pipeline: simple commands are spawned; an element that is not (and,
 # or, chain, a nested pipeline) runs in this process, which keeps its pipe
 # ends open until the element's last command has ended.  Run with
-# redirections applied in the kid (fork) and in the parent ($Run::Wraparound).
+# redirections applied in the kid (fork) and in the parent ($Run::Forkless).
 use strict; use warnings;
 use Test::More;
 use POSIX ();
@@ -29,8 +29,8 @@ sub run_p {
 }
 
 for my $wrap (0, 1) {
-  local $Run::Wraparound = $wrap;
-  my $m = $wrap ? 'wraparound' : 'fork';
+  local $Run::Forkless = $wrap;
+  my $m = $wrap ? 'forkless' : 'fork';
   my $fds = fds();
   my %d = (errs => []);
 
