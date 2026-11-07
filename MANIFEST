@@ -12,3 +12,4 @@ t/fixes.t
 t/pipeline.t
 t/forkless.t
 t/start.t
+t/win32.t
