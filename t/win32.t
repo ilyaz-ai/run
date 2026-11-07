@@ -6,7 +6,7 @@ use Test::More;
 use Run (); use POSIX (); use File::Temp qw(tempdir);
 my $real = $^O eq 'MSWin32';
 ($Run::AsWin32, $Run::Forkless) = (1, 1) unless $real;
-diag $real ? 'Win32' : 'Unix, with $Run::AsWin32: all but the Win32API::File calls';
+note $real ? 'Win32' : 'Unix, with $Run::AsWin32: all but the Win32API::File calls';
 my $dir = tempdir(CLEANUP => 1); my $perl = $^X;
 sub script { my ($n, $code) = @_; open my $f, '>', "$dir/$n" or die; print $f $code; close $f; "$dir/$n" }
 sub slurp { open my $f, '<', $_[0] or return ''; local $/; my $t = <$f>; close $f; $t =~ s/\r//g; $t }

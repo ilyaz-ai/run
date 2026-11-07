@@ -39,7 +39,7 @@ sub to { new_redir([1 => {filename => $_[0], mode => '>'}], $_[1]) }
   print $w "w\n"; close $w;
   1 until wait == -1;
   is slurp($out), "W\n", 'pipe w';
-  ok to($out, new_pipeline(perl('print "x\n"'), new_or(perl('exit 1'), perl('print "y$_" while <STDIN>'))))->run,
+  ok to($out, new_pipeline(perl('print "x\n"'), new_or(perl('exit 1'), perl('print "y$_" while <STDIN>'))))->run({errs => []}),   # (its exit 1 is meant)
     'pipeline with a group run here';
   is slurp($out), "yx\n", '... output';
   my $pid2 = Run::spawn($^X, '-e', 'exit 0');

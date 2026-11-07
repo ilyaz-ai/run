@@ -956,6 +956,16 @@ a later one succeeds; should they be cleared?
 
 Ilya Zakharevich E<lt>ilyaz@cpan.orgE<gt>
 
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 1997-2026 by Ilya Zakharevich.
+
+This library is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.  That is, at your choice, under the
+GNU General Public License as published by the Free Software Foundation
+(version 1, or any later version), or under the Artistic License that comes
+with Perl (see L<perlartistic> and L<perlgpl>).
+
 =head1 SEE ALSO
 
 L<perlfunc/system>, L<perlport>, L<Proc::Spawner>.

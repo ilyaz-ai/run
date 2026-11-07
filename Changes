@@ -106,3 +106,8 @@ Revision history for Perl extension Run.
 	  Win32; spawn returns undef on failure (not 0, as it said).  README
 	  rewritten; Makefile.PL with abstract, author, prerequisites (Perl
 	  5.10.1), repository.
+	- Licence stated: the same terms as Perl itself (GPL 1 or later, or
+	  the Artistic License); before, no version said.
+	- Tests quiet under prove: t/forkless.t's meant "exit 1" no longer
+	  prints its message, t/win32.t's line about the mode is a note, and
+	  t/as-win32.t shows a file's STDERR only when that file fails.

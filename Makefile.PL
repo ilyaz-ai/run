@@ -4,6 +4,7 @@ WriteMakefile(
     VERSION_FROM     => 'Run.pm',
     ABSTRACT_FROM    => 'Run.pm',
     AUTHOR           => 'Ilya Zakharevich <ilyaz@cpan.org>',
+    LICENSE          => 'perl_5',
     MIN_PERL_VERSION => '5.010001',    # //; TAP::Parser in t/as-win32.t
     PREREQ_PM        => { 'POSIX' => 0, 'Fcntl' => 0, 'IO::File' => 0,
                           ($^O eq 'MSWin32' ? ('Win32API::File' => 0) : ()) },
