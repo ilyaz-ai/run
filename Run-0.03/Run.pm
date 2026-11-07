@@ -17,7 +17,7 @@ my $use_longer_control_F = 0;	# redir.t no. 13 is fragile with this
 @EXPORT = qw(
 	spawn
 );
-$VERSION = '0.02';
+$VERSION = '0.03';
 
 %EXPORT_TAGS = ( NEW => [qw(new_system new_spawn new_or new_and new_chain
 			    new_env new_redir new_pipe new_readpipe
@@ -56,13 +56,14 @@ sub spawn {
     }
     return system 1, @_;
   } elsif ($^O eq 'MSWin32' or $^O eq 'VMS') {
-    warn "not implemented yet on $^O" if $^W;
-    return;
+    return system 1, @_;
   } else {
+    print $SaveErr "forking...\t\t\t\t\t\t\t\$^F=$^F\n" if $Debug;
     my $pid = fork;
     return unless defined $pid;
     return $pid if $pid;	# parent
     # kid:
+    print $SaveErr "execing `@_'...\n" if $Debug;
     exec @_ or die "exec '@_': $!";
   }
 }
@@ -71,25 +72,34 @@ sub xfcntl ($$$$;$) {
   my ($fh, $mode, $flag, $errs, $how) = @_;
   my $fd = ref $fh ? fileno $fh : $fh;
   $how ||= "";
+  my $str_mode = '';
+  $str_mode = ($mode == Fcntl::F_GETFD() 
+	       ? '=get'
+	       : ($mode == Fcntl::F_SETFD()
+		  ? '=set'
+		  : '=???')) if $Debug;
 
-  print $SaveErr "$ {how}fcntl($fd, $mode, $flag)\n"
-    if $Debug;
-  fcntl($fh, $mode, $flag)
+  my $ret = fcntl($fh, $mode, $flag)
       or push @$errs, "$ {how}fcntl get $fd: $!", 
 	 ($Debug and print $SaveErr $errs->[-1], "\n"),
          return;
+  print $SaveErr "$ {how}fcntl($fd, $mode$str_mode, $flag) => $ret\n"
+    if $Debug;
+  $ret;
 }
 
 sub xclose ($$$) {
   my ($fh, $errs, $how) = @_;
+  my $fd = fileno $fh;
 
-  print $SaveErr "$ {how}close fd=@{[fileno $fh]}\n" if $Debug;
+  print $SaveErr "$ {how}closing fd=$fd...\n" if $Debug;
   my $res = close($fh);
+  print "$ {how}close $fh fd=$fd => `$res': $!\n"
+    if not $res and $Debug;
   if ($res or $no_error_on_unwind_close and  $how eq "unwind: ") {
     return $res;
   }
-  push(@$errs, "$ {how}close $fh fd=@{[fileno $fh]}: $!");
-  print $SaveErr $errs->[-1], "\n" if $Debug;
+  push(@$errs, "$ {how}close $fh fd=$fd: $!");
   return;
 }
 
@@ -97,15 +107,16 @@ sub xfdopen ($$$$$) {
   my ($fh1, $fh2, $mode, $errs, $how) = @_;
   my $fd1 = fileno $fh1;
   my $fd2 = ref $fh2 ? fileno $fh2 : $fh2;
-
-  print $SaveErr "$ {how}( fd=$fd1 )\->fdopen($fd2,$mode)\n" 
-    if $Debug;
   my $res;
-  if ($res = $fh1->fdopen($fh2, $mode)) {
+  my $omode = ($mode eq 'r' ? '<' : '>');
+  
+  print $SaveErr "$ {how}open( fd=$fd1, '$omode&$fd2')\n" if $Debug;
+
+  if ($res = open($fh1,"$omode&$fd2")) {
     print $SaveErr "   -> ", fileno $fh1, "\t\t\t\t$res\t\$^F=$^F\n" if $Debug;
     return $res;
   } else {
-    push(@$errs, "$ {how}( fd=$fd1 )\->fdopen($fd2,$mode): $!"), 
+    push(@$errs, "$ {how}open( fd=$fd1, '$omode&$fd2'): $!"), 
     ($Debug and print $SaveErr $errs->[-1], "\n"),
     return;
   }
@@ -239,6 +250,7 @@ sub fd_2filehandle ($$$$$) {
   # Grab the file descriptor
   my $fh = xnew_from_fd($fd, $mode, [], "grabfd: "); # ignore errors
   if (not defined $fh and $! =~ /bad\s+file\s+number/i) {
+    print $SaveErr "Recovering from error in new_from_fd...\n" if $Debug;
     # Try to create missing filehandles
     my ($cnt, @tmp, $tmp_fh, $ok) = 0;
     my $old = $fds->{$fd}{filehandle};
@@ -465,11 +477,11 @@ sub Run::pipe::run {
   my $rpipe = IO::Handle->new;
   my $wpipe = IO::Handle->new;
 
-  print $SaveErr "pipe creation\n" if $Debug;
+  print $SaveErr "pipe creation (parent will $dir)\n" if $Debug;
   pipe($rpipe,$wpipe) 
     or print(STDERR "cannot create pipe: $!\n"), return;
-  print $SaveErr "  --> ", fileno $rpipe, "\t\t\t\t$rpipe\t\$^F=$^F\n" if $Debug;
-  print $SaveErr "  --> ", fileno $wpipe, "\t\t\t\t$wpipe\t\$^F=$^F\n" if $Debug;
+  print $SaveErr "  --> ", fileno $rpipe, "\t\t\t\tread  $rpipe\t\$^F=$^F\n" if $Debug;
+  print $SaveErr "  --> ", fileno $wpipe, "\t\t\t\twrite $wpipe\t\$^F=$^F\n" if $Debug;
   my ($toclose, $ret, $redir);
   
   if ($dir eq 'r') {
@@ -481,11 +493,16 @@ sub Run::pipe::run {
     $toclose = $rpipe;
     $ret = $wpipe;
   }
+  # XXXX Do not use unwind argument???
   process_close_in_kid([$ret],[],{},[]); # XXXX No error handling here
   local $data->{'spawn'} = 1;
   $redir->run($data) or return;
-  xclose($toclose,[],"pipe: ")
-    or print(STDERR "cannot close pipe end not belonging to me: $!"), return;
+
+  # XXXX This is not needed, since run() called unwind() which closed
+  # fd=0/1, which invalidated $toclose anyway.
+
+  xclose($toclose,[],"pipe::run: ")
+    or print(STDERR "pipe::run: cannot close pipe end not belonging to me: $!\n"), return;
   return $ret;
 }
 

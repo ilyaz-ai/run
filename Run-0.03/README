@@ -5,4 +5,4 @@ This module may be used in two ways:
      b) It implements run-trees which may be used instead of starting shell
      	to run compicated commands.
      	
-	
+(Some tests still fail on some platforms.)	
