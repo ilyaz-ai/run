@@ -87,7 +87,14 @@ Revision history for Perl extension Run.
 	  closed, a missing program, our fds put back.  Arguments go to Perl
 	  as they are: Perl's command line does not quote them as the C
 	  runtime parses them back (a bug of Perl's, reported).
+	- $Run::AsWin32 (true on Win32; RUN_AS_WIN32=1 or set it on Unix, for
+	  debugging): the Win32 code paths, with FD_CLOEXEC standing in for
+	  the handle's inheritance on Unix (os_inherit()), so all but the
+	  Win32API::File calls run and are tested there.  The whole suite
+	  passes so, and Proc::Spawner's through Run; a dup loop broken on
+	  purpose fails t/win32.t on Linux.
 	New tests: t/start.t (also: a file start() opens is closed again;
 	checked to fail when the handle is kept), t/win32.t (Win32 only; under
 	Wine 13 pass and the argv test is TODO; with 0.06 it dies at the
-	first copy of an fd: "Your vendor has not defined Fcntl macro F_DUPFD").
+	first copy of an fd: "Your vendor has not defined Fcntl macro F_DUPFD";
+	on Unix it runs with $Run::AsWin32).

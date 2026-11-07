@@ -84,18 +84,29 @@ sub spawn_nowait {
 
 # Win32 (0.07): Perl has no fcntl there, and close-on-exec is a handle that is
 # not inherited; Win32API::File (which comes with Perl there) reads and sets it.
-my $win32 = $^O eq 'MSWin32';
-sub win_handle {		# the OS handle of fd $n, or undef ($! = EBADF)
-  require Win32API::File;
-  my $h = Win32API::File::FdGetOsFHandle($_[0]);
-  return $h if defined $h and $h != Win32API::File::INVALID_HANDLE_VALUE();
-  $! = POSIX::EBADF(); return;
-}
-sub win_inherit {		# fd $n inherited or not; true on success
+# $Run::AsWin32 (true on Win32; on Unix set it, or RUN_AS_WIN32=1, to debug)
+# takes these code paths: copies by dup instead of F_DUPFD, no aliases in the
+# wraparound, the flag through os_inherit(); on Unix FD_CLOEXEC stands in for
+# the handle's inheritance there, so all but the Win32API::File calls run.
+our $AsWin32 = $^O eq 'MSWin32' || !!$ENV{RUN_AS_WIN32};
+sub os_inherit {	# (N): is fd N inherited?  (N, ON): make it so or not.  undef, $! = EBADF: N not open
   my ($n, $on) = @_;
-  my $h = win_handle($n) // return;
-  Win32API::File::SetHandleInformation($h, Win32API::File::HANDLE_FLAG_INHERIT(),
-				       $on ? Win32API::File::HANDLE_FLAG_INHERIT() : 0);
+  if ($^O eq 'MSWin32') {
+    require Win32API::File;
+    my $h = Win32API::File::FdGetOsFHandle($n);
+    defined $h and $h != Win32API::File::INVALID_HANDLE_VALUE() or do { $! = POSIX::EBADF(); return };
+    my $bit = Win32API::File::HANDLE_FLAG_INHERIT();
+    return Win32API::File::SetHandleInformation($h, $bit, $on ? $bit : 0) if @_ > 1;
+    my $f = 0;
+    Win32API::File::GetHandleInformation($h, $f) or return;
+    return $f & $bit ? 1 : 0;
+  }
+  defined(my $t = POSIX::dup($n)) or return;	# (the stand-in, for debugging on Unix)
+  if (@_ > 1 && $on) { POSIX::dup2($t, $n); POSIX::close($t); return 1 }	# dup2 clears FD_CLOEXEC
+  POSIX::close($t);
+  return unix_set_cloexec($n) if @_ > 1;
+  my $c = unix_is_cloexec($n) // return;
+  $c ? 0 : 1;
 }
 sub win_dup_above {		# no F_DUPFD there: dup until high enough
   my ($src, $min) = @_;
@@ -109,7 +120,7 @@ sub win_dup_above {		# no F_DUPFD there: dup until high enough
 }
 sub cloexec_fh {		# FD_CLOEXEC on the handle's fd
   my $fh = shift;
-  $win32 ? win_inherit(fileno $fh, 0) : fcntl($fh, F_SETFD, FD_CLOEXEC);
+  $AsWin32 ? os_inherit(fileno $fh, 0) : fcntl($fh, F_SETFD, FD_CLOEXEC);
 }
 
 # A close-on-exec copy of $fh's fd at the lowest free fd >= $min.
@@ -117,7 +128,7 @@ sub dup_above {
   my ($fh, $min, $mode) = @_;
   my $fd;
   my $copy;
-  if ($win32) {			# $fh may be an fd number there
+  if ($AsWin32) {		# $fh may be an fd number there
     $fd = win_dup_above(ref $fh ? fileno $fh : $fh, $min) // return;
   } else {
     $fd = fcntl($fh, F_DUPFD, $min) // return;
@@ -290,12 +301,14 @@ sub fdinfo_flags {
 }
 sub is_cloexec {
   my $n = shift;
-  if ($win32) {			# Win32: read, not inferred (0.07)
-    my $h = win_handle($n) // return;
-    my $f = 0;
-    Win32API::File::GetHandleInformation($h, $f) or return;
-    return $f & Win32API::File::HANDLE_FLAG_INHERIT() ? 0 : 1;
+  if ($AsWin32) {		# Win32: read, not inferred (0.07)
+    my $i = os_inherit($n) // return;
+    return $i ? 0 : 1;
   }
+  unix_is_cloexec($n);
+}
+sub unix_is_cloexec {
+  my $n = shift;
   unless (defined $cloexec_bit) {
     $cloexec_bit = 0;
     if (pipe my $r, my $w) {
@@ -328,7 +341,11 @@ sub release {
 # Sets FD_CLOEXEC on fd $n.
 sub set_cloexec {
   my $n = shift;
-  return win_inherit($n, 0) if $win32;
+  return os_inherit($n, 0) if $AsWin32;
+  unix_set_cloexec($n);
+}
+sub unix_set_cloexec {
+  my $n = shift;
   local $^F = $n - 1 if $n - 1 < $^F;	# Perl's own open sets it for fd > $^F
   open my $alias, '<&=', $n or return;
   fcntl($alias, F_SETFD, FD_CLOEXEC);
@@ -352,7 +369,7 @@ sub wraparound {
       next;
     }
     my $copy;
-    if ($win32) {			# an fd number does there: no alias needed
+    if ($AsWin32) {		# an fd number does there: no alias needed
       $copy = dup_above($n, $base);
     } else {
       # The alias may change $n's flag; harmless, as apply() replaces $n.
@@ -805,6 +822,12 @@ Win32API::File; a kid sees only fds 0..2 there (Perl's spawn passes the
 standard handles), and its arguments go through Perl's command line, which
 does not quote them as the kid's C runtime parses them back.  Tested on
 Linux, and on Win32 under Wine (Strawberry Perl 5.38.2); OS/2 and VMS not.
+
+C<$Run::AsWin32> (true on Win32) takes the Win32 code paths: copies made by
+C<dup> instead of C<F_DUPFD>, the flag read and set through C<os_inherit()>.
+Set it on Unix (or C<RUN_AS_WIN32=1> in the environment) to debug and test
+them there: C<FD_CLOEXEC> then stands in for the handle's inheritance, so all
+but the Win32API::File calls themselves run.
 
 =head1 NOTES
 
