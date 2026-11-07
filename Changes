@@ -30,3 +30,27 @@ Revision history for Perl extension Run.
 	Now: applied in the kid after fork; with $Run::Wraparound, applied in
 	the parent around the spawn and restored exactly.  Ordered lists,
 	">&N" and ">&-".  New test t/fdtable.t.
+
+0.05:	new_pipeline: "a | b | c".  Elements other than simple commands
+	(and, or, chain, pipeline) run in this process, which keeps the
+	write end open until their last command has ended, as needed for
+	"{ a || b } | c"; with fork, a second such element runs in a forked
+	copy.
+	Fixes:
+	- new_system/new_spawn with one element ran it as a shell string;
+	  now always "exec { PROG } LIST".  The exported spawn() is
+	  unchanged;
+	- {filename => NAME, mode => OP} opens NAME literally with sh's
+	  < > >| >> <> (2-argument open misread "-", "&1", leading blanks,
+	  and had no "<>");
+	- $data->{result} was set only on failure and never reset; now the
+	  $? of every system, 0 included, or -1 when nothing started (also
+	  when a new_redir target cannot be opened);
+	- new_chain failed if any command failed; now the last one decides;
+	- new_readpipe and new_readpipe_split never reaped their kid (its
+	  pid no longer appears in the caller's $data->{pids});
+	- an exec failure was reported twice (also as a warning under -w);
+	  messages no longer show a stale $!.
+	Not tested: the list form "system { PROG } 1, LIST" on OS/2, Win32
+	and VMS.
+	New tests t/fixes.t and t/pipeline.t.
