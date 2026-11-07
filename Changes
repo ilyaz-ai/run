@@ -97,4 +97,5 @@ Revision history for Perl extension Run.
 	checked to fail when the handle is kept), t/win32.t (Win32 only; under
 	Wine 13 pass and the argv test is TODO; with 0.06 it dies at the
 	first copy of an fd: "Your vendor has not defined Fcntl macro F_DUPFD";
-	on Unix it runs with $Run::AsWin32).
+	on Unix it runs with $Run::AsWin32), t/as-win32.t (every other test
+	file again with RUN_AS_WIN32=1, one test per file; skipped on Win32).
