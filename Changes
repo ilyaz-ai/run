@@ -1,0 +1,32 @@
+Revision history for Perl extension Run.
+
+0.01  Thu Dec 18 14:50:57 1997
+	- original version; created by h2xs 1.18
+
+0.02:	Initial release (chain, or, and, pipe, env, redir).
+	Redir very fragile in complicated situations (tests 10-13 may fail
+	depending on what fd were used when started).
+
+0.03:	fdopen() is in fact ">&=FOO", thus close of created filehandle
+	invalidates FOO.  Changed to open().
+
+	Some tests still do not work right.
+
+0.04:	Redirections rewritten.  The flakiness had these causes:
+	- process_close_in_kid() returned false for an empty list, so
+	  redirecting fd N failed silently whenever N was the lowest free fd;
+	- fd numbers were created by dup()ing up to N and never closed, so
+	  each run changed which fds the next run found free;
+	- a saved copy of one target could land on a later target, and the
+	  guard against it compared a filehandle with fd numbers;
+	- restoring with $^F back at 2 set close-on-exec on restored fds and
+	  could move them; with $^F raised, leaked fds lost it instead
+	  (hence "redir.t no. 13 is fragile with this");
+	- the original F_GETFD result "0 but true" was passed to F_SETFD as a
+	  string, i.e. as a pointer;
+	- hash order decided the order of redirections at one level;
+	- ">&=N" filenames were opened before outer redirections were applied;
+	- "Bad file number" was matched in $! (Linux says "Bad file descriptor").
+	Now: applied in the kid after fork; with $Run::Wraparound, applied in
+	the parent around the spawn and restored exactly.  Ordered lists,
+	">&N" and ">&-".  New test t/fdtable.t.

@@ -7,3 +7,4 @@ t/chain.t
 t/pipe.t
 t/redir.t
 t/redir_mayfail.t
+t/fdtable.t
