@@ -2,6 +2,7 @@ Changes
 MANIFEST
 Makefile.PL
 README
+TODO
 Run.pm
 t/chain.t
 t/pipe.t

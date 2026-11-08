@@ -111,3 +111,4 @@ Revision history for Perl extension Run.
 	- Tests quiet under prove: t/forkless.t's meant "exit 1" no longer
 	  prints its message, t/win32.t's line about the mode is a note, and
 	  t/as-win32.t shows a file's STDERR only when that file fails.
+	- TODO: what is open (the author's decisions first), shipped.

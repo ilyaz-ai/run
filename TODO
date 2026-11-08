@@ -1,0 +1,26 @@
+Run: what is open, in one place
+===============================
+
+After 0.07 (2026-11-08).  Keep this file current: when an item is decided or
+done, remove it here and record it where it belongs (Changes, the POD).
+
+A. WAITING FOR THE AUTHOR'S DECISION
+
+ 1. A command that only exits non-zero puts "system `CMD': rc=N" into errs
+    (printed on STDERR when the caller collects no errs).  sh says nothing
+    then, and the status is in $data->{result} anyway.  Act: keep it, or
+    report only what kept a command from running.
+ 2. The messages of the commands of new_or that failed stay in errs when a
+    later one succeeds (the POD's TODO).  Act: keep them, or clear them.
+ 3. Release 0.07 on CPAN (its ZIP is on its download page); Proc-Spawner
+    0.09 recommends it.
+
+B. WORK (no decision needed)
+
+ - Win32: a kid's arguments go through Perl's command line, which does not
+   quote them as the kid's C runtime parses them back (a bug of Perl's;
+   t/win32.t's argv test is TODO until Perl is fixed).  Drafts of the
+   report: Proc-Spawner's doc/perl-win32-system-bugs.md.
+ - Win32 is tested under Wine only; OS/2 and VMS are not tested at all.
+ - Outside Linux and Win32 the close-on-exec flag of a target fd is
+   inferred, not read (Perl cannot read it without changing it).

@@ -15,7 +15,7 @@ and on systems with a native spawn but no fork (Win32, OS/2, VMS):
 Where there is no fork, the redirections are applied in this process around
 the spawn and put back after.  Those code paths can be run and tested on Unix
 too ($Run::Forkless; $Run::AsWin32 for the Win32 ones).  See the POD (perldoc
-Run) for the details and the limits.
+Run) for the details and the limits, and TODO for what is open.
 
 Tested on Linux (Perl 5.38), and on Win32 under Wine with Strawberry Perl
 5.38.2.  OS/2 and VMS are not tested.
