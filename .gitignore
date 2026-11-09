@@ -1,0 +1,9 @@
+# build output (perl Makefile.PL && make; make dist)
+/Makefile
+/Makefile.old
+/MYMETA.*
+/blib/
+/pm_to_blib
+/Run-*/
+/Run-*.zip
+/Run-*.tar.gz
